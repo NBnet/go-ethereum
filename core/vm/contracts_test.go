@@ -23,10 +23,13 @@ import (
 	"flag"
 	"fmt"
 	"github.com/consensys/gnark-crypto/ecc"
+	"github.com/consensys/gnark/backend/groth16"
 	"github.com/consensys/gnark/backend/plonk"
 	cs "github.com/consensys/gnark/constraint/bn254"
 	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/frontend/cs/r1cs"
 	"github.com/consensys/gnark/frontend/cs/scs"
+	"github.com/consensys/gnark/test"
 	"github.com/consensys/gnark/test/unsafekzg"
 	"github.com/ethereum/go-ethereum/common"
 	"os"
@@ -508,6 +511,11 @@ func TestGnarkPlonk(t *testing.T) {
 			Witness:   w_buf.Bytes(),
 		}
 
+		fmt.Printf("CurveId: %v\n", inputs.CurveId)
+		fmt.Printf("Proof: %x\n", inputs.Proof)
+		fmt.Printf("VerifyKey: %x\n", inputs.VerifyKey)
+		fmt.Printf("Witness: %x\n", inputs.Witness)
+
 		encode, err := inputs.ToAbi().Pack(&inputs)
 
 		if err != nil {
@@ -603,6 +611,70 @@ func TestGnarkPlonk(t *testing.T) {
 		if "n" != string(result) {
 			t.Fatal("Error")
 		}
+	}
+}
+
+type CubicCircuit struct {
+	// struct tags on a variable is optional
+	// default uses variable name and secret visibility.
+	X frontend.Variable `gnark:"x"`
+	Y frontend.Variable `gnark:",public"`
+}
+
+// Define declares the circuit constraints
+// x**3 + x + 5 == y
+func (circuit *CubicCircuit) Define(api frontend.API) error {
+	x3 := api.Mul(circuit.X, circuit.X, circuit.X)
+	api.AssertIsEqual(circuit.Y, api.Add(x3, circuit.X, 5))
+	return nil
+}
+
+func TestGroth16Verify(t *testing.T) {
+	assert := test.NewAssert(t)
+
+	var circuit CubicCircuit
+	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
+	assert.NoError(err)
+
+	pk, vk, err := groth16.Setup(ccs)
+	assert.NoError(err)
+
+	assignment := CubicCircuit{X: 3, Y: 35}
+	witness, err := frontend.NewWitness(&assignment, ecc.BN254.ScalarField())
+	assert.NoError(err)
+
+	publicWitness, _ := witness.Public()
+	proof, err := groth16.Prove(ccs, pk, witness)
+	assert.NoError(err)
+
+	var p_buf bytes.Buffer
+	_, err = proof.WriteTo(&p_buf)
+	assert.NoError(err)
+
+	var vk_buf bytes.Buffer
+	_, err = vk.WriteTo(&vk_buf)
+	assert.NoError(err)
+
+	var w_buf bytes.Buffer
+	_, err = publicWitness.WriteTo(&w_buf)
+	assert.NoError(err)
+
+	inputs := GnarkInputs{
+		CurveId:   ecc.BN254,
+		Proof:     p_buf.Bytes(),
+		VerifyKey: vk_buf.Bytes(),
+		Witness:   w_buf.Bytes(),
+	}
+	encode, err := inputs.ToAbi().Pack(&inputs)
+
+	var g gnarkGroth16Verify
+	result, err := g.Run(encode)
+	if nil != err {
+		t.Fatal("Error")
+	}
+
+	if "y" != string(result) {
+		t.Fatal("Error")
 	}
 }
 
