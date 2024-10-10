@@ -17,10 +17,12 @@
 package vm
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"maps"
 	"math/big"
 
@@ -28,6 +30,9 @@ import (
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fp"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
+	"github.com/consensys/gnark/backend/groth16"
+	"github.com/consensys/gnark/backend/plonk"
+	"github.com/consensys/gnark/backend/witness"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/tracing"
@@ -57,6 +62,9 @@ var PrecompiledContractsHomestead = PrecompiledContracts{
 	common.BytesToAddress([]byte{0x2}): &sha256hash{},
 	common.BytesToAddress([]byte{0x3}): &ripemd160hash{},
 	common.BytesToAddress([]byte{0x4}): &dataCopy{},
+
+	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
+	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
 }
 
 // PrecompiledContractsByzantium contains the default set of pre-compiled Ethereum
@@ -70,6 +78,9 @@ var PrecompiledContractsByzantium = PrecompiledContracts{
 	common.BytesToAddress([]byte{0x6}): &bn256AddByzantium{},
 	common.BytesToAddress([]byte{0x7}): &bn256ScalarMulByzantium{},
 	common.BytesToAddress([]byte{0x8}): &bn256PairingByzantium{},
+
+	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
+	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
 }
 
 // PrecompiledContractsIstanbul contains the default set of pre-compiled Ethereum
@@ -84,6 +95,9 @@ var PrecompiledContractsIstanbul = PrecompiledContracts{
 	common.BytesToAddress([]byte{0x7}): &bn256ScalarMulIstanbul{},
 	common.BytesToAddress([]byte{0x8}): &bn256PairingIstanbul{},
 	common.BytesToAddress([]byte{0x9}): &blake2F{},
+
+	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
+	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
 }
 
 // PrecompiledContractsBerlin contains the default set of pre-compiled Ethereum
@@ -98,6 +112,9 @@ var PrecompiledContractsBerlin = PrecompiledContracts{
 	common.BytesToAddress([]byte{0x7}): &bn256ScalarMulIstanbul{},
 	common.BytesToAddress([]byte{0x8}): &bn256PairingIstanbul{},
 	common.BytesToAddress([]byte{0x9}): &blake2F{},
+
+	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
+	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
 }
 
 // PrecompiledContractsCancun contains the default set of pre-compiled Ethereum
@@ -113,6 +130,9 @@ var PrecompiledContractsCancun = PrecompiledContracts{
 	common.BytesToAddress([]byte{0x8}): &bn256PairingIstanbul{},
 	common.BytesToAddress([]byte{0x9}): &blake2F{},
 	common.BytesToAddress([]byte{0xa}): &kzgPointEvaluation{},
+
+	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
+	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
 }
 
 // PrecompiledContractsPrague contains the set of pre-compiled Ethereum
@@ -137,6 +157,9 @@ var PrecompiledContractsPrague = PrecompiledContracts{
 	common.BytesToAddress([]byte{0x11}): &bls12381Pairing{},
 	common.BytesToAddress([]byte{0x12}): &bls12381MapG1{},
 	common.BytesToAddress([]byte{0x13}): &bls12381MapG2{},
+
+	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
+	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
 }
 
 var PrecompiledContractsBLS = PrecompiledContractsPrague
@@ -1250,4 +1273,108 @@ func kZGToVersionedHash(kzg kzg4844.Commitment) common.Hash {
 	h[0] = blobCommitmentVersionKZG
 
 	return h
+}
+
+type GnarkInputs struct {
+	CurveId   ecc.ID `json:"curve_id"`
+	Proof     []byte `json:"proof"`
+	VerifyKey []byte `json:"verify_key"`
+	Witness   []byte `json:"witness"`
+}
+
+func (g GnarkInputs) ToAbi() *abi.Arguments {
+
+	gi, _ := abi.NewType("tuple", "GnarkInputs", []abi.ArgumentMarshaling{
+		{Name: "curve_id", Type: "uint16"},
+		{Name: "proof", Type: "bytes"},
+		{Name: "verify_key", Type: "bytes"},
+		{Name: "witness", Type: "bytes"},
+	})
+
+	args := abi.Arguments{
+		{Type: gi, Name: "grank_inputs"},
+	}
+
+	return &args
+}
+
+type gnarkGroth16Verify struct{}
+
+func (b *gnarkGroth16Verify) RequiredGas(input []byte) uint64 {
+	return 7500
+}
+
+func (c *gnarkGroth16Verify) Run(input []byte) ([]byte, error) {
+	unpack, err := GnarkInputs{}.ToAbi().Unpack(input)
+	if err != nil {
+		return nil, err
+	}
+	gi := unpack[0].(struct {
+		CurveId   uint16 `json:"curve_id"`
+		Proof     []byte `json:"proof"`
+		VerifyKey []byte `json:"verify_key"`
+		Witness   []byte `json:"witness"`
+	})
+
+	id := ecc.ID(gi.CurveId)
+
+	proof := groth16.NewProof(id)
+	proof.ReadFrom(bytes.NewReader(gi.Proof))
+
+	vk := groth16.NewVerifyingKey(id)
+	vk.ReadFrom(bytes.NewReader(gi.VerifyKey))
+
+	witness, err := witness.New(id.ScalarField())
+	if nil != err {
+		return nil, err
+	}
+	witness.ReadFrom(bytes.NewReader(gi.Witness))
+
+	err = groth16.Verify(proof, vk, witness)
+	if nil == err {
+		return []byte("y"), nil
+	} else {
+		return []byte("n"), nil
+	}
+}
+
+type gnarkPlonkVerify struct{}
+
+func (b *gnarkPlonkVerify) RequiredGas(input []byte) uint64 {
+	return 7500
+}
+
+func (c *gnarkPlonkVerify) Run(input []byte) ([]byte, error) {
+	unpack, err := GnarkInputs{}.ToAbi().Unpack(input)
+	if err != nil {
+		return nil, err
+	}
+
+	gi := unpack[0].(struct {
+		CurveId   uint16 `json:"curve_id"`
+		Proof     []byte `json:"proof"`
+		VerifyKey []byte `json:"verify_key"`
+		Witness   []byte `json:"witness"`
+	})
+
+	id := ecc.ID(gi.CurveId)
+
+	proof := plonk.NewProof(id)
+	proof.ReadFrom(bytes.NewReader(gi.Proof))
+
+	vk := plonk.NewVerifyingKey(id)
+	vk.ReadFrom(bytes.NewReader(gi.VerifyKey))
+
+	witness, err := witness.New(id.ScalarField())
+	if nil != err {
+		return nil, err
+	}
+	witness.ReadFrom(bytes.NewReader(gi.Witness))
+
+	err = plonk.Verify(proof, vk, witness)
+	if nil == err {
+		return []byte("y"), nil
+	} else {
+		return []byte("n"), nil
+	}
 }
