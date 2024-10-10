@@ -18,7 +18,7 @@ package vm
 
 import (
 	"bytes"
-	"encoding/hex"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -31,7 +31,9 @@ import (
 	"github.com/consensys/gnark/frontend/cs/scs"
 	"github.com/consensys/gnark/test"
 	"github.com/consensys/gnark/test/unsafekzg"
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"os"
 	"testing"
 	"time"
@@ -511,18 +513,11 @@ func TestGnarkPlonk(t *testing.T) {
 			Witness:   w_buf.Bytes(),
 		}
 
-		fmt.Printf("CurveId: %v\n", inputs.CurveId)
-		fmt.Printf("Proof: %x\n", inputs.Proof)
-		fmt.Printf("VerifyKey: %x\n", inputs.VerifyKey)
-		fmt.Printf("Witness: %x\n", inputs.Witness)
-
 		encode, err := inputs.ToAbi().Pack(&inputs)
 
 		if err != nil {
 			t.Fatal(err)
 		}
-
-		println("encode:", hex.EncodeToString(encode))
 
 		var g gnarkPlonkVerify
 		result, err := g.Run(encode)
@@ -678,6 +673,193 @@ func TestGroth16Verify(t *testing.T) {
 	}
 }
 
+func TestRemoteGroth16(t *testing.T) {
+	to := "0xff00"
+	rpc := "http://34.169.54.171:8545"
+
+	cli, err := ethclient.Dial(rpc)
+	if err != nil {
+		panic(err)
+	}
+
+	assert := test.NewAssert(t)
+
+	var circuit CubicCircuit
+	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
+	assert.NoError(err)
+
+	pk, vk, err := groth16.Setup(ccs)
+	assert.NoError(err)
+
+	assignment := CubicCircuit{X: 3, Y: 35}
+	witness, err := frontend.NewWitness(&assignment, ecc.BN254.ScalarField())
+	assert.NoError(err)
+
+	publicWitness, _ := witness.Public()
+	proof, err := groth16.Prove(ccs, pk, witness)
+	assert.NoError(err)
+
+	var p_buf bytes.Buffer
+	_, err = proof.WriteTo(&p_buf)
+	assert.NoError(err)
+
+	var vk_buf bytes.Buffer
+	_, err = vk.WriteTo(&vk_buf)
+	assert.NoError(err)
+
+	var w_buf bytes.Buffer
+	_, err = publicWitness.WriteTo(&w_buf)
+	assert.NoError(err)
+
+	inputs := GnarkInputs{
+		CurveId:   ecc.BN254,
+		Proof:     p_buf.Bytes(),
+		VerifyKey: vk_buf.Bytes(),
+		Witness:   w_buf.Bytes(),
+	}
+	encode, err := inputs.ToAbi().Pack(&inputs)
+
+	toAddr := common.HexToAddress(to)
+
+	callMsg := ethereum.CallMsg{
+		From:          common.Address{},
+		To:            &toAddr,
+		Gas:           0,
+		GasPrice:      nil,
+		GasFeeCap:     nil,
+		GasTipCap:     nil,
+		Value:         nil,
+		Data:          encode,
+		AccessList:    nil,
+		BlobGasFeeCap: nil,
+		BlobHashes:    nil,
+	}
+
+	result, err := cli.CallContract(context.Background(), callMsg, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	if "y" != string(result) {
+		t.Fatal("Error")
+	}
+}
+
+func TestRemotePlonk(t *testing.T) {
+	to := "0xff01"
+	rpc := "http://34.169.54.171:8545"
+
+	cli, err := ethclient.Dial(rpc)
+	if err != nil {
+		panic(err)
+	}
+
+	var circuit Circuit
+
+	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), scs.NewBuilder, &circuit)
+	if err != nil {
+		fmt.Println("circuit compilation error")
+	}
+
+	scs := ccs.(*cs.SparseR1CS)
+	srs, srsLagrange, err := unsafekzg.NewSRS(scs)
+	if err != nil {
+		panic(err)
+	}
+
+	// Witnesses instantiation. Witness is known only by the prover,
+	// while public w is a public data known by the verifier.
+	var w Circuit
+	w.X = 2
+	w.E = 2
+	w.Y = 4
+
+	witnessFull, err := frontend.NewWitness(&w, ecc.BN254.ScalarField())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	witnessPublic, err := frontend.NewWitness(&w, ecc.BN254.ScalarField(), frontend.PublicOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// public data consists of the polynomials describing the constants involved
+	// in the constraints, the polynomial describing the permutation ("grand
+	// product argument"), and the FFT domains.
+	pk, vk, err := plonk.Setup(ccs, srs, srsLagrange)
+	//_, err := plonk.Setup(r1cs, kate, &publicWitness)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proof, err := plonk.Prove(ccs, pk, witnessFull)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = plonk.Verify(proof, vk, witnessPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var p_buf bytes.Buffer
+	_, err = proof.WriteTo(&p_buf)
+	if nil != err {
+		t.Fatal("Error: serialize failed")
+	}
+
+	var vk_buf bytes.Buffer
+	_, err = vk.WriteTo(&vk_buf)
+	if nil != err {
+		t.Fatal("Error: serialize failed")
+	}
+
+	var w_buf bytes.Buffer
+	_, err = witnessPublic.WriteTo(&w_buf)
+	if nil != err {
+		t.Fatal("Error: serialize failed")
+	}
+
+	inputs := GnarkInputs{
+		CurveId:   ecc.BN254,
+		Proof:     p_buf.Bytes(),
+		VerifyKey: vk_buf.Bytes(),
+		Witness:   w_buf.Bytes(),
+	}
+
+	encode, err := inputs.ToAbi().Pack(&inputs)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	toAddr := common.HexToAddress(to)
+
+	callMsg := ethereum.CallMsg{
+		From:          common.Address{},
+		To:            &toAddr,
+		Gas:           0,
+		GasPrice:      nil,
+		GasFeeCap:     nil,
+		GasTipCap:     nil,
+		Value:         nil,
+		Data:          encode,
+		AccessList:    nil,
+		BlobGasFeeCap: nil,
+		BlobHashes:    nil,
+	}
+
+	result, err := cli.CallContract(context.Background(), callMsg, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	if "y" != string(result) {
+		t.Fatal("Error")
+	}
+
+}
 var (
 	Input string
 )
