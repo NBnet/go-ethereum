@@ -1520,7 +1520,11 @@ func (b *expanderVerify) parseExpanderInput(input []byte, flag string) error {
 		}
 
 		var ok bool
-		data, ok = args[0].(parseData)
+		data, ok = args[0].(struct {
+			Circuit []uint8 `json:"circuit"`
+			Witness []uint8 `json:"witness"`
+			Proof   []uint8 `json:"proof"`
+		})
 		if !ok {
 			return ErrCodeErr(EVUnpackSideChainDataErr)
 		}
