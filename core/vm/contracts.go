@@ -19,6 +19,7 @@ package vm
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -32,7 +33,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 
@@ -75,6 +75,7 @@ var PrecompiledContractsHomestead = PrecompiledContracts{
 
 	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
 	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
+	common.BytesToAddress([]byte{0xff, 0x02}): &expanderVerify{},
 }
 
 // PrecompiledContractsByzantium contains the default set of pre-compiled Ethereum
@@ -91,6 +92,7 @@ var PrecompiledContractsByzantium = PrecompiledContracts{
 
 	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
 	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
+	common.BytesToAddress([]byte{0xff, 0x02}): &expanderVerify{},
 }
 
 // PrecompiledContractsIstanbul contains the default set of pre-compiled Ethereum
@@ -108,6 +110,7 @@ var PrecompiledContractsIstanbul = PrecompiledContracts{
 
 	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
 	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
+	common.BytesToAddress([]byte{0xff, 0x02}): &expanderVerify{},
 }
 
 // PrecompiledContractsBerlin contains the default set of pre-compiled Ethereum
@@ -125,6 +128,7 @@ var PrecompiledContractsBerlin = PrecompiledContracts{
 
 	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
 	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
+	common.BytesToAddress([]byte{0xff, 0x02}): &expanderVerify{},
 }
 
 // PrecompiledContractsCancun contains the default set of pre-compiled Ethereum
@@ -143,6 +147,7 @@ var PrecompiledContractsCancun = PrecompiledContracts{
 
 	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
 	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
+	common.BytesToAddress([]byte{0xff, 0x02}): &expanderVerify{},
 }
 
 // PrecompiledContractsPrague contains the set of pre-compiled Ethereum
@@ -170,6 +175,7 @@ var PrecompiledContractsPrague = PrecompiledContracts{
 
 	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
 	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
+	common.BytesToAddress([]byte{0xff, 0x02}): &expanderVerify{},
 }
 
 var PrecompiledContractsBLS = PrecompiledContractsPrague
@@ -1351,17 +1357,10 @@ func (b *gnarkGroth16Verify) RequiredGas(input []byte) uint64 {
 	return 7500
 }
 
-func printType(v interface{}) {
-	// 使用 reflect.TypeOf 获取参数的类型
-	t := reflect.TypeOf(v)
-
-	fmt.Printf("The type of the parameter is: %s\n", t.String())
-}
-
 func (c *gnarkGroth16Verify) Run(input []byte) ([]byte, error) {
 	unpack, err := GnarkInputs{}.ToAbi().Unpack(input)
 	if err != nil {
-		return nil, err
+		return nil, ErrCodeErr(GG16VInputUnpackErr)
 	}
 	gi := unpack[0].(struct {
 		CurveId   uint16 `json:"curve_id"`
@@ -1380,15 +1379,15 @@ func (c *gnarkGroth16Verify) Run(input []byte) ([]byte, error) {
 
 	witness, err := witness.New(id.ScalarField())
 	if nil != err {
-		return nil, err
+		return nil, ErrCodeErr(GG16VWitnessNewErr)
 	}
 	witness.ReadFrom(bytes.NewReader(gi.Witness))
 
 	err = groth16.Verify(proof, vk, witness)
 	if nil == err {
-		return []byte("y"), nil
+		return EncodeBool(true), nil
 	} else {
-		return []byte("n"), nil
+		return EncodeBool(false), nil
 	}
 }
 
@@ -1442,37 +1441,37 @@ func (b *expanderVerify) parseInput(input []byte) ([]byte, error) {
 	_, err := os.Stat(indexFile)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			return nil, err
+			return nil, ErrCodeErr(EVReadIndexErr)
 		}
 	}
 
 	heightBinaryBytes, err := os.ReadFile(indexFile)
 	if err != nil {
-		return nil, err
+		return nil, ErrCodeErr(EVReadIndexErr)
 	}
 
 	indexHeight, err = strconv.ParseUint(string(heightBinaryBytes), 10, 64)
 	if err != nil {
-		return nil, err
+		return nil, ErrCodeErr(EVParseIndexErr)
 	}
 
 	decode, err := expanderInputArgs.Unpack(input[1:])
 	if err != nil {
-		return nil, err
+		return nil, ErrCodeErr(EVUnpackInputErr)
 	}
 
 	inputHeight, ok := decode[0].(*big.Int)
 	if !ok {
-		return nil, errors.New("input height parse to uint64 failed")
+		return nil, ErrCodeErr(EVParseInputHeightErr)
 	}
 
 	if inputHeight.Uint64() > indexHeight {
-		return nil, errors.New("input height is greater than index height")
+		return nil, ErrCodeErr(EVInputGreaterThanIndexHeightErr)
 	}
 
 	inputHash, ok := decode[1].([32]uint8)
 	if !ok {
-		return nil, errors.New("input hash parse to []byte failed")
+		return nil, ErrCodeErr(EVParseInputHashErr)
 	}
 	inputHashHex := hex.EncodeToString(inputHash[:])
 
@@ -1480,18 +1479,18 @@ func (b *expanderVerify) parseInput(input []byte) ([]byte, error) {
 
 	data, err := os.ReadFile(dataFile)
 	if err != nil {
-		return nil, err
+		return nil, ErrCodeErr(EVReadSideChainDataErr)
 	}
 
 	data, err = hex.DecodeString(string(data))
 	if err != nil {
-		return nil, err
+		return nil, ErrCodeErr(EVReadSideChainDataErr)
 	}
 
 	return data, nil
 }
 
-func (b *expanderVerify) parseExpanderInput(input []byte) error {
+func (b *expanderVerify) parseExpanderInput(input []byte, flag string) error {
 
 	// define
 	type parseData struct {
@@ -1505,88 +1504,88 @@ func (b *expanderVerify) parseExpanderInput(input []byte) error {
 	{
 		reader, err := gzip.NewReader(bytes.NewReader(input))
 		if err != nil {
-			return err
+			return ErrCodeErr(EVGzipDecompressErr)
 		}
 		defer reader.Close()
 
 		var deCompressData bytes.Buffer
 		_, err = io.Copy(&deCompressData, reader)
 		if err != nil {
-			return err
+			return ErrCodeErr(EVGzipDecompressErr)
 		}
 
 		args, err := expanderInternalArgs.Unpack(deCompressData.Bytes())
 		if err != nil {
-			return err
+			return ErrCodeErr(EVUnpackSideChainDataErr)
 		}
 
 		var ok bool
 		data, ok = args[0].(parseData)
 		if !ok {
-			return err
+			return ErrCodeErr(EVUnpackSideChainDataErr)
 		}
 	}
 
 	// write data to file
 	{
-		circuitFilePath, witnessFilePath, proofFilePath := b.genExpanderInputFilePath()
+		circuitFilePath, witnessFilePath, proofFilePath := b.genExpanderInputFilePath(flag)
 
 		circuitFile, err := os.OpenFile(circuitFilePath, os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			return err
+			return ErrCodeErr(EVOtherErr)
 		}
 		defer circuitFile.Close()
 
 		if _, err = circuitFile.Write(data.Circuit); err != nil {
-			return err
+			return ErrCodeErr(EVOtherErr)
 		}
 
 		witnessFile, err := os.OpenFile(witnessFilePath, os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			return err
+			return ErrCodeErr(EVOtherErr)
 		}
 		defer witnessFile.Close()
 
 		if _, err = witnessFile.Write(data.Witness); err != nil {
-			return err
+			return ErrCodeErr(EVOtherErr)
 		}
 
 		proofFile, err := os.OpenFile(proofFilePath, os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			return err
+			return ErrCodeErr(EVOtherErr)
 		}
 		defer proofFile.Close()
 
 		if _, err = proofFile.Write(data.Proof); err != nil {
-			return err
+			return ErrCodeErr(EVOtherErr)
 		}
 	}
 
 	return nil
 }
 
-func (b *expanderVerify) execExpander() (bool, error) {
-	circuitFilePath, witnessFilePath, proofFilePath := b.genExpanderInputFilePath()
+func (b *expanderVerify) execExpander(flag string) (bool, error) {
+	circuitFilePath, witnessFilePath, proofFilePath := b.genExpanderInputFilePath(flag)
 
 	cmd := exec.Command("expander-exec", "verify", circuitFilePath, witnessFilePath, proofFilePath)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return false, err
+		return false, ErrCodeErr(EVOtherErr)
 	}
 	defer stdout.Close()
 
 	if err = cmd.Start(); err != nil {
-		return false, err
+		return false, ErrCodeErr(EVOtherErr)
 	}
 
 	var outputBuf bytes.Buffer
 	if _, err := io.Copy(&outputBuf, stdout); err != nil {
-		return false, err
+		return false, ErrCodeErr(EVOtherErr)
 	}
 
 	if err := cmd.Wait(); err != nil {
-		return false, err
+		return false, ErrCodeErr(EVOtherErr)
 	}
 
 	outputStr := outputBuf.String()
@@ -1599,10 +1598,10 @@ func (b *expanderVerify) execExpander() (bool, error) {
 	}
 }
 
-func (b *expanderVerify) genExpanderInputFilePath() (string, string, string) {
-	circuitFilePath := filepath.Join(expanderInternalTmpPath, "circuit")
-	witnessFilePath := filepath.Join(expanderInternalTmpPath, "witness")
-	proofFilePath := filepath.Join(expanderInternalTmpPath, "proof")
+func (b *expanderVerify) genExpanderInputFilePath(flag string) (string, string, string) {
+	circuitFilePath := filepath.Join(expanderInternalTmpPath, "circuit-"+flag)
+	witnessFilePath := filepath.Join(expanderInternalTmpPath, "witness-"+flag)
+	proofFilePath := filepath.Join(expanderInternalTmpPath, "proof-"+flag)
 
 	return circuitFilePath, witnessFilePath, proofFilePath
 }
@@ -1614,6 +1613,7 @@ func (b *expanderVerify) RequiredGas(input []byte) uint64 {
 func (b *expanderVerify) Run(input []byte) ([]byte, error) {
 
 	var in []byte
+	flag := fmt.Sprintf("%x", md5.Sum(input))
 
 	switch input[0] {
 	case 0:
@@ -1625,21 +1625,21 @@ func (b *expanderVerify) Run(input []byte) ([]byte, error) {
 		}
 		in = data
 	default:
-		return nil, errors.New("invalid input")
+		return nil, ErrCodeErr(EVInvalidInput)
 	}
 
-	if err := b.parseExpanderInput(in); err != nil {
+	if err := b.parseExpanderInput(in, flag); err != nil {
 		return nil, err
 	}
 
-	success, err := b.execExpander()
+	success, err := b.execExpander(flag)
 	if err != nil {
 		return nil, err
 	}
 
 	if success {
-		return []byte("y"), nil
+		return EncodeBool(true), nil
 	} else {
-		return []byte("n"), nil
+		return EncodeBool(false), nil
 	}
 }
