@@ -18,13 +18,23 @@ package vm
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"io"
+	"io/fs"
 	"maps"
 	"math/big"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
@@ -175,6 +185,14 @@ var (
 	PrecompiledAddressesHomestead []common.Address
 )
 
+var (
+	expanderSideChainDataPath string
+	expanderIndexFile         = "index"
+	expanderInputArgs         abi.Arguments
+	expanderInternalArgs      abi.Arguments
+	expanderInternalTmpPath   string
+)
+
 func init() {
 	for k := range PrecompiledContractsHomestead {
 		PrecompiledAddressesHomestead = append(PrecompiledAddressesHomestead, k)
@@ -193,6 +211,35 @@ func init() {
 	}
 	for k := range PrecompiledContractsPrague {
 		PrecompiledAddressesPrague = append(PrecompiledAddressesPrague, k)
+	}
+
+	expanderSideChainDataPath = os.Getenv("SIDE_CHAIN_DATA_PATH")
+	if len(expanderSideChainDataPath) == 0 {
+		panic("the environment variable 'SIDE_CHAIN_DATA_PATH' is not set")
+	}
+
+	expanderInternalTmpPath = filepath.Join(expanderSideChainDataPath, "tmp")
+	err := os.MkdirAll(expanderInternalTmpPath, 0700)
+	if err != nil {
+		fmt.Println(err)
+		panic("cannot create expander tmp folder")
+	}
+
+	uint256Type, _ := abi.NewType("uint256", "", nil)
+	bytes32, _ := abi.NewType("bytes32", "", nil)
+	tuple, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+		{Type: "bytes", Name: "circuit"},
+		{Type: "bytes", Name: "witness"},
+		{Type: "bytes", Name: "proof"},
+	})
+
+	expanderInputArgs = abi.Arguments{
+		{Type: uint256Type},
+		{Type: bytes32},
+	}
+
+	expanderInternalArgs = abi.Arguments{
+		{Type: tuple},
 	}
 }
 
@@ -1304,6 +1351,13 @@ func (b *gnarkGroth16Verify) RequiredGas(input []byte) uint64 {
 	return 7500
 }
 
+func printType(v interface{}) {
+	// 使用 reflect.TypeOf 获取参数的类型
+	t := reflect.TypeOf(v)
+
+	fmt.Printf("The type of the parameter is: %s\n", t.String())
+}
+
 func (c *gnarkGroth16Verify) Run(input []byte) ([]byte, error) {
 	unpack, err := GnarkInputs{}.ToAbi().Unpack(input)
 	if err != nil {
@@ -1373,6 +1427,217 @@ func (c *gnarkPlonkVerify) Run(input []byte) ([]byte, error) {
 
 	err = plonk.Verify(proof, vk, witness)
 	if nil == err {
+		return []byte("y"), nil
+	} else {
+		return []byte("n"), nil
+	}
+}
+
+type expanderVerify struct{}
+
+func (b *expanderVerify) parseInput(input []byte) ([]byte, error) {
+	indexFile := filepath.Join(expanderSideChainDataPath, expanderIndexFile)
+
+	indexHeight := uint64(0)
+	_, err := os.Stat(indexFile)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+	}
+
+	heightBinaryBytes, err := os.ReadFile(indexFile)
+	if err != nil {
+		return nil, err
+	}
+
+	indexHeight, err = strconv.ParseUint(string(heightBinaryBytes), 10, 64)
+	if err != nil {
+		return nil, err
+	}
+
+	decode, err := expanderInputArgs.Unpack(input[1:])
+	if err != nil {
+		return nil, err
+	}
+
+	inputHeight, ok := decode[0].(*big.Int)
+	if !ok {
+		return nil, errors.New("input height parse to uint64 failed")
+	}
+
+	if inputHeight.Uint64() > indexHeight {
+		return nil, errors.New("input height is greater than index height")
+	}
+
+	inputHash, ok := decode[1].([32]uint8)
+	if !ok {
+		return nil, errors.New("input hash parse to []byte failed")
+	}
+	inputHashHex := hex.EncodeToString(inputHash[:])
+
+	dataFile := filepath.Join(expanderSideChainDataPath, inputHashHex[:4], inputHashHex)
+
+	data, err := os.ReadFile(dataFile)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err = hex.DecodeString(string(data))
+	if err != nil {
+		return nil, err
+	}
+
+	return data, nil
+}
+
+func (b *expanderVerify) parseExpanderInput(input []byte) error {
+
+	// define
+	type parseData struct {
+		Circuit []uint8 `json:"circuit"`
+		Witness []uint8 `json:"witness"`
+		Proof   []uint8 `json:"proof"`
+	}
+
+	// decompress
+	var data parseData
+	{
+		reader, err := gzip.NewReader(bytes.NewReader(input))
+		if err != nil {
+			return err
+		}
+		defer reader.Close()
+
+		var deCompressData bytes.Buffer
+		_, err = io.Copy(&deCompressData, reader)
+		if err != nil {
+			return err
+		}
+
+		args, err := expanderInternalArgs.Unpack(deCompressData.Bytes())
+		if err != nil {
+			return err
+		}
+
+		var ok bool
+		data, ok = args[0].(parseData)
+		if !ok {
+			return err
+		}
+	}
+
+	// write data to file
+	{
+		circuitFilePath, witnessFilePath, proofFilePath := b.genExpanderInputFilePath()
+
+		circuitFile, err := os.OpenFile(circuitFilePath, os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		defer circuitFile.Close()
+
+		if _, err = circuitFile.Write(data.Circuit); err != nil {
+			return err
+		}
+
+		witnessFile, err := os.OpenFile(witnessFilePath, os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		defer witnessFile.Close()
+
+		if _, err = witnessFile.Write(data.Witness); err != nil {
+			return err
+		}
+
+		proofFile, err := os.OpenFile(proofFilePath, os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		defer proofFile.Close()
+
+		if _, err = proofFile.Write(data.Proof); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (b *expanderVerify) execExpander() (bool, error) {
+	circuitFilePath, witnessFilePath, proofFilePath := b.genExpanderInputFilePath()
+
+	cmd := exec.Command("expander-exec", "verify", circuitFilePath, witnessFilePath, proofFilePath)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return false, err
+	}
+	defer stdout.Close()
+
+	if err = cmd.Start(); err != nil {
+		return false, err
+	}
+
+	var outputBuf bytes.Buffer
+	if _, err := io.Copy(&outputBuf, stdout); err != nil {
+		return false, err
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return false, err
+	}
+
+	outputStr := outputBuf.String()
+
+	outputStr = strings.TrimSpace(outputStr)
+	if strings.ToLower(outputStr) == "success" {
+		return true, nil
+	} else {
+		return false, nil
+	}
+}
+
+func (b *expanderVerify) genExpanderInputFilePath() (string, string, string) {
+	circuitFilePath := filepath.Join(expanderInternalTmpPath, "circuit")
+	witnessFilePath := filepath.Join(expanderInternalTmpPath, "witness")
+	proofFilePath := filepath.Join(expanderInternalTmpPath, "proof")
+
+	return circuitFilePath, witnessFilePath, proofFilePath
+}
+
+func (b *expanderVerify) RequiredGas(input []byte) uint64 {
+	return 7500
+}
+
+func (b *expanderVerify) Run(input []byte) ([]byte, error) {
+
+	var in []byte
+
+	switch input[0] {
+	case 0:
+		in = input[1:]
+	case 1:
+		data, err := b.parseInput(input)
+		if err != nil {
+			return nil, err
+		}
+		in = data
+	default:
+		return nil, errors.New("invalid input")
+	}
+
+	if err := b.parseExpanderInput(in); err != nil {
+		return nil, err
+	}
+
+	success, err := b.execExpander()
+	if err != nil {
+		return nil, err
+	}
+
+	if success {
 		return []byte("y"), nil
 	} else {
 		return []byte("n"), nil

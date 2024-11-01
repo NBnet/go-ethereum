@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend/plonk"
@@ -603,4 +604,29 @@ func TestGnarkPlonk(t *testing.T) {
 			t.Fatal("Error")
 		}
 	}
+}
+
+var (
+	Input string
+)
+
+func init() {
+	flag.StringVar(&Input, "input", "", "input")
+}
+
+func TestExpander(t *testing.T) {
+	t.Log("input: ", Input)
+
+	inputBytes, err := hex.DecodeString(Input)
+
+	if err != nil {
+		panic(err)
+	}
+	ev := expanderVerify{}
+	d, err := ev.Run(inputBytes)
+	if err != nil {
+		panic(err)
+	}
+
+	println(string(d))
 }
