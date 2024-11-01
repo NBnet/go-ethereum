@@ -19,7 +19,6 @@ package vm
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/md5"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -1434,63 +1433,53 @@ func (c *gnarkPlonkVerify) Run(input []byte) ([]byte, error) {
 
 type expanderVerify struct{}
 
-func (b *expanderVerify) parseInput(input []byte) ([]byte, error) {
+func (b *expanderVerify) parseInput(input []byte) (string, error) {
 	indexFile := filepath.Join(expanderSideChainDataPath, expanderIndexFile)
 
 	indexHeight := uint64(0)
 	_, err := os.Stat(indexFile)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			return nil, ErrCodeErr(EVReadIndexErr)
+			return "", ErrCodeErr(EVReadIndexErr)
 		}
 	}
 
 	heightBinaryBytes, err := os.ReadFile(indexFile)
 	if err != nil {
-		return nil, ErrCodeErr(EVReadIndexErr)
+		return "", ErrCodeErr(EVReadIndexErr)
 	}
 
 	indexHeight, err = strconv.ParseUint(string(heightBinaryBytes), 10, 64)
 	if err != nil {
-		return nil, ErrCodeErr(EVParseIndexErr)
+		return "", ErrCodeErr(EVParseIndexErr)
 	}
 
 	decode, err := expanderInputArgs.Unpack(input[1:])
 	if err != nil {
-		return nil, ErrCodeErr(EVUnpackInputErr)
+		return "", ErrCodeErr(EVUnpackInputErr)
 	}
 
 	inputHeight, ok := decode[0].(*big.Int)
 	if !ok {
-		return nil, ErrCodeErr(EVParseInputHeightErr)
+		return "", ErrCodeErr(EVParseInputHeightErr)
 	}
 
 	if inputHeight.Uint64() > indexHeight {
-		return nil, ErrCodeErr(EVInputGreaterThanIndexHeightErr)
+		return "", ErrCodeErr(EVInputGreaterThanIndexHeightErr)
 	}
 
 	inputHash, ok := decode[1].([32]uint8)
 	if !ok {
-		return nil, ErrCodeErr(EVParseInputHashErr)
+		return "", ErrCodeErr(EVParseInputHashErr)
 	}
 	inputHashHex := hex.EncodeToString(inputHash[:])
 
 	dataFile := filepath.Join(expanderSideChainDataPath, inputHashHex[:4], inputHashHex)
 
-	data, err := os.ReadFile(dataFile)
-	if err != nil {
-		return nil, ErrCodeErr(EVReadSideChainDataErr)
-	}
-
-	data, err = hex.DecodeString(string(data))
-	if err != nil {
-		return nil, ErrCodeErr(EVReadSideChainDataErr)
-	}
-
-	return data, nil
+	return dataFile, nil
 }
 
-func (b *expanderVerify) parseExpanderInput(input []byte, flag string) error {
+func (b *expanderVerify) parseExpanderInput(input []byte) (string, error) {
 
 	// define
 	type parseData struct {
@@ -1504,19 +1493,19 @@ func (b *expanderVerify) parseExpanderInput(input []byte, flag string) error {
 	{
 		reader, err := gzip.NewReader(bytes.NewReader(input))
 		if err != nil {
-			return ErrCodeErr(EVGzipDecompressErr)
+			return "", ErrCodeErr(EVGzipDecompressErr)
 		}
 		defer reader.Close()
 
 		var deCompressData bytes.Buffer
 		_, err = io.Copy(&deCompressData, reader)
 		if err != nil {
-			return ErrCodeErr(EVGzipDecompressErr)
+			return "", ErrCodeErr(EVGzipDecompressErr)
 		}
 
 		args, err := expanderInternalArgs.Unpack(deCompressData.Bytes())
 		if err != nil {
-			return ErrCodeErr(EVUnpackSideChainDataErr)
+			return "", ErrCodeErr(EVUnpackSideChainDataErr)
 		}
 
 		var ok bool
@@ -1526,53 +1515,29 @@ func (b *expanderVerify) parseExpanderInput(input []byte, flag string) error {
 			Proof   []uint8 `json:"proof"`
 		})
 		if !ok {
-			return ErrCodeErr(EVUnpackSideChainDataErr)
+			return "", ErrCodeErr(EVUnpackSideChainDataErr)
 		}
 	}
 
-	// write data to file
-	{
-		circuitFilePath, witnessFilePath, proofFilePath := b.genExpanderInputFilePath(flag)
+	filedType := data.Circuit[8:40]
 
-		circuitFile, err := os.OpenFile(circuitFilePath, os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return ErrCodeErr(EVOtherErr)
-		}
-		defer circuitFile.Close()
-
-		if _, err = circuitFile.Write(data.Circuit); err != nil {
-			return ErrCodeErr(EVOtherErr)
-		}
-
-		witnessFile, err := os.OpenFile(witnessFilePath, os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return ErrCodeErr(EVOtherErr)
-		}
-		defer witnessFile.Close()
-
-		if _, err = witnessFile.Write(data.Witness); err != nil {
-			return ErrCodeErr(EVOtherErr)
-		}
-
-		proofFile, err := os.OpenFile(proofFilePath, os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return ErrCodeErr(EVOtherErr)
-		}
-		defer proofFile.Close()
-
-		if _, err = proofFile.Write(data.Proof); err != nil {
-			return ErrCodeErr(EVOtherErr)
-		}
-	}
-
-	return nil
+	return hex.EncodeToString(filedType), nil
 }
 
-func (b *expanderVerify) execExpander(flag string) (bool, error) {
-	circuitFilePath, witnessFilePath, proofFilePath := b.genExpanderInputFilePath(flag)
+func (b *expanderVerify) execExpanderScd(txDataFilePath string) (bool, error) {
 
-	cmd := exec.Command("expander-exec", "verify", circuitFilePath, witnessFilePath, proofFilePath)
+	cmd := exec.Command("expander-exec", "verify-scd", txDataFilePath)
 
+	return b.execExpander(cmd)
+}
+
+func (b *expanderVerify) execExpanderBytes(data string) (bool, error) {
+	cmd := exec.Command("expander-exec", "verify-bytes", data)
+
+	return b.execExpander(cmd)
+}
+
+func (b *expanderVerify) execExpander(cmd *exec.Cmd) (bool, error) {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return false, ErrCodeErr(EVOtherErr)
@@ -1616,27 +1581,23 @@ func (b *expanderVerify) RequiredGas(input []byte) uint64 {
 
 func (b *expanderVerify) Run(input []byte) ([]byte, error) {
 
-	var in []byte
-	flag := fmt.Sprintf("%x", md5.Sum(input))
+	var success bool
+	var err error
 
 	switch input[0] {
 	case 0:
-		in = input[1:]
+		data := hex.EncodeToString(input[1:])
+		success, err = b.execExpanderBytes(data)
 	case 1:
-		data, err := b.parseInput(input)
+		dataFilePath, err := b.parseInput(input)
 		if err != nil {
 			return nil, err
 		}
-		in = data
+		success, err = b.execExpanderScd(dataFilePath)
 	default:
 		return nil, ErrCodeErr(EVInvalidInput)
 	}
 
-	if err := b.parseExpanderInput(in, flag); err != nil {
-		return nil, err
-	}
-
-	success, err := b.execExpander(flag)
 	if err != nil {
 		return nil, err
 	}
