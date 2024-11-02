@@ -1531,8 +1531,9 @@ func (b *expanderVerify) execExpanderScd(txDataFilePath string) (bool, error) {
 	return b.execExpander(cmd)
 }
 
-func (b *expanderVerify) execExpanderBytes(data string) (bool, error) {
-	cmd := exec.Command("expander-exec", "verify-bytes", data)
+func (b *expanderVerify) execExpanderBytes(input []byte) (bool, error) {
+
+	cmd := exec.Command("expander-exec", "verify-bytes", string(input))
 
 	return b.execExpander(cmd)
 }
@@ -1575,6 +1576,22 @@ func (b *expanderVerify) genExpanderInputFilePath(flag string) (string, string, 
 	return circuitFilePath, witnessFilePath, proofFilePath
 }
 
+func (b *expanderVerify) decompressInput(input []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(input))
+	if err != nil {
+		return nil, ErrCodeErr(EVGzipDecompressErr)
+	}
+	defer reader.Close()
+
+	var deCompressData bytes.Buffer
+	_, err = io.Copy(&deCompressData, reader)
+	if err != nil {
+		return nil, ErrCodeErr(EVGzipDecompressErr)
+	}
+
+	return deCompressData.Bytes(), nil
+}
+
 func (b *expanderVerify) RequiredGas(input []byte) uint64 {
 	return 7500
 }
@@ -1586,9 +1603,17 @@ func (b *expanderVerify) Run(input []byte) ([]byte, error) {
 
 	switch input[0] {
 	case 0:
-		data := hex.EncodeToString(input[1:])
-		success, err = b.execExpanderBytes(data)
+		// direct
+		success, err = b.execExpanderBytes(input[1:])
 	case 1:
+		// decompress
+		data, err := b.decompressInput(input[1:])
+		if err != nil {
+			return nil, err
+		}
+		success, err = b.execExpanderBytes(data)
+	case 2:
+		// parse scd data file path
 		dataFilePath, err := b.parseInput(input)
 		if err != nil {
 			return nil, err
