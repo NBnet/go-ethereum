@@ -220,7 +220,8 @@ func init() {
 
 	expanderSideChainDataPath = os.Getenv("SIDE_CHAIN_DATA_PATH")
 	if len(expanderSideChainDataPath) == 0 {
-		panic("the environment variable 'SIDE_CHAIN_DATA_PATH' is not set")
+		expanderSideChainDataPath = "/tmp/side_chain_data"
+		fmt.Printf("`$SIDE_CHAIN_DATA_PATH` not set, use the default path: %s\n", expanderSideChainDataPath)
 	}
 
 	expanderInternalTmpPath = filepath.Join(expanderSideChainDataPath, "tmp")
