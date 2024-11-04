@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"io"
-	"io/fs"
 	"maps"
 	"math/big"
 	"os"
@@ -1438,21 +1437,28 @@ func (b *expanderVerify) parseInput(input []byte) (string, error) {
 	indexFile := filepath.Join(expanderSideChainDataPath, expanderIndexFile)
 
 	indexHeight := uint64(0)
+	indexFileExist := true
 	_, err := os.Stat(indexFile)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
+		if os.IsNotExist(err) {
+			indexFileExist = false
+		} else {
 			return "", ErrCodeErr(EVReadIndexErr)
 		}
 	}
 
-	heightBinaryBytes, err := os.ReadFile(indexFile)
-	if err != nil {
-		return "", ErrCodeErr(EVReadIndexErr)
-	}
+	if indexFileExist {
+		heightBinaryBytes, err := os.ReadFile(indexFile)
+		if err != nil {
+			return "", ErrCodeErr(EVReadIndexErr)
+		}
 
-	indexHeight, err = strconv.ParseUint(string(heightBinaryBytes), 10, 64)
-	if err != nil {
-		return "", ErrCodeErr(EVParseIndexErr)
+		indexHeight, err = strconv.ParseUint(string(heightBinaryBytes), 10, 64)
+		if err != nil {
+			return "", ErrCodeErr(EVParseIndexErr)
+		}
+	} else {
+		indexHeight = 0
 	}
 
 	decode, err := expanderInputArgs.Unpack(input[1:])
@@ -1473,56 +1479,20 @@ func (b *expanderVerify) parseInput(input []byte) (string, error) {
 	if !ok {
 		return "", ErrCodeErr(EVParseInputHashErr)
 	}
+
 	inputHashHex := hex.EncodeToString(inputHash[:])
 
 	dataFile := filepath.Join(expanderSideChainDataPath, inputHashHex[:4], inputHashHex)
+	_, err = os.Stat(dataFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrCodeErr(EVReadSideChainDataErr)
+		} else {
+			return "", ErrCodeErr(EVOtherErr)
+		}
+	}
 
 	return dataFile, nil
-}
-
-func (b *expanderVerify) parseExpanderInput(input []byte) (string, error) {
-
-	// define
-	type parseData struct {
-		Circuit []uint8 `json:"circuit"`
-		Witness []uint8 `json:"witness"`
-		Proof   []uint8 `json:"proof"`
-	}
-
-	// decompress
-	var data parseData
-	{
-		reader, err := gzip.NewReader(bytes.NewReader(input))
-		if err != nil {
-			return "", ErrCodeErr(EVGzipDecompressErr)
-		}
-		defer reader.Close()
-
-		var deCompressData bytes.Buffer
-		_, err = io.Copy(&deCompressData, reader)
-		if err != nil {
-			return "", ErrCodeErr(EVGzipDecompressErr)
-		}
-
-		args, err := expanderInternalArgs.Unpack(deCompressData.Bytes())
-		if err != nil {
-			return "", ErrCodeErr(EVUnpackSideChainDataErr)
-		}
-
-		var ok bool
-		data, ok = args[0].(struct {
-			Circuit []uint8 `json:"circuit"`
-			Witness []uint8 `json:"witness"`
-			Proof   []uint8 `json:"proof"`
-		})
-		if !ok {
-			return "", ErrCodeErr(EVUnpackSideChainDataErr)
-		}
-	}
-
-	filedType := data.Circuit[8:40]
-
-	return hex.EncodeToString(filedType), nil
 }
 
 func (b *expanderVerify) execExpanderScd(txDataFilePath string) (bool, error) {

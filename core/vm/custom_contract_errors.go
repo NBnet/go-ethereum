@@ -25,16 +25,7 @@ var (
 	EVInputGreaterThanIndexHeightErr = 1000026
 	EVParseInputHashErr              = 1000027
 	EVReadSideChainDataErr           = 1000028
-	EVGzipReadErr                    = 1000029
 	EVGzipDecompressErr              = 1000030
-	EVUnpackSideChainDataErr         = 1000031
-	EVParseSideChainDataErr          = 1000032
-	EVOpenFileErr                    = 1000033
-	EVWriteFileErr                   = 1000034
-	EVCmdOutputGetErr                = 1000035
-	EVCmdStartErr                    = 1000036
-	EVCmdResultGetErr                = 1000037
-	EVCmdWaitErr                     = 1000038
 	EVInvalidInput                   = 1000039
 	EVOtherErr                       = 1000040
 )
