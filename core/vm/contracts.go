@@ -1426,9 +1426,9 @@ func (c *gnarkPlonkVerify) Run(input []byte) ([]byte, error) {
 
 	err = plonk.Verify(proof, vk, witness)
 	if nil == err {
-		return []byte("y"), nil
+		return EncodeBool(true), nil
 	} else {
-		return []byte("n"), nil
+		return EncodeBool(false), nil
 	}
 }
 
