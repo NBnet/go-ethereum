@@ -1356,7 +1356,14 @@ func (b *gnarkGroth16Verify) RequiredGas(input []byte) uint64 {
 	return 7500
 }
 
-func (c *gnarkGroth16Verify) Run(input []byte) ([]byte, error) {
+func (c *gnarkGroth16Verify) Run(input []byte) (b []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			b = EncodeBool(false)
+			err = nil
+		}
+	}()
+
 	unpack, err := GnarkInputs{}.ToAbi().Unpack(input)
 	if err != nil {
 		return nil, ErrCodeErr(GG16VInputUnpackErr)
@@ -1378,16 +1385,16 @@ func (c *gnarkGroth16Verify) Run(input []byte) ([]byte, error) {
 
 	witness, err := witness.New(id.ScalarField())
 	if nil != err {
-		return nil, ErrCodeErr(GG16VWitnessNewErr)
+		return EncodeBool(false), nil
 	}
 	witness.ReadFrom(bytes.NewReader(gi.Witness))
 
 	err = groth16.Verify(proof, vk, witness)
-	if nil == err {
-		return EncodeBool(true), nil
-	} else {
+	if nil != err {
 		return EncodeBool(false), nil
 	}
+
+	return EncodeBool(true), nil
 }
 
 type gnarkPlonkVerify struct{}
@@ -1396,10 +1403,17 @@ func (b *gnarkPlonkVerify) RequiredGas(input []byte) uint64 {
 	return 7500
 }
 
-func (c *gnarkPlonkVerify) Run(input []byte) ([]byte, error) {
+func (c *gnarkPlonkVerify) Run(input []byte) (b []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			b = EncodeBool(false)
+			err = nil
+		}
+	}()
+
 	unpack, err := GnarkInputs{}.ToAbi().Unpack(input)
 	if err != nil {
-		return nil, err
+		return nil, ErrCodeErr(GPVInputUnpackErr)
 	}
 
 	gi := unpack[0].(struct {
@@ -1419,16 +1433,16 @@ func (c *gnarkPlonkVerify) Run(input []byte) ([]byte, error) {
 
 	witness, err := witness.New(id.ScalarField())
 	if nil != err {
-		return nil, err
+		return EncodeBool(false), nil
 	}
 	witness.ReadFrom(bytes.NewReader(gi.Witness))
 
 	err = plonk.Verify(proof, vk, witness)
-	if nil == err {
-		return EncodeBool(true), nil
-	} else {
+	if nil != err {
 		return EncodeBool(false), nil
 	}
+
+	return EncodeBool(true), nil
 }
 
 type expanderVerify struct{}
