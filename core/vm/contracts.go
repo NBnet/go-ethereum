@@ -1360,7 +1360,7 @@ func (c *gnarkGroth16Verify) Run(input []byte) (b []byte, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			b = EncodeBool(false)
-			err = nil
+			err = ErrCodeErr(GG16OtherErr)
 		}
 	}()
 
@@ -1385,13 +1385,13 @@ func (c *gnarkGroth16Verify) Run(input []byte) (b []byte, err error) {
 
 	witness, err := witness.New(id.ScalarField())
 	if nil != err {
-		return EncodeBool(false), nil
+		return EncodeBool(false), ErrCodeErr(GG16WitnessErr)
 	}
 	witness.ReadFrom(bytes.NewReader(gi.Witness))
 
 	err = groth16.Verify(proof, vk, witness)
 	if nil != err {
-		return EncodeBool(false), nil
+		return EncodeBool(false), ErrCodeErr(GG16VVerifyErr)
 	}
 
 	return EncodeBool(true), nil
@@ -1407,7 +1407,7 @@ func (c *gnarkPlonkVerify) Run(input []byte) (b []byte, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			b = EncodeBool(false)
-			err = nil
+			err = ErrCodeErr(GPVOther)
 		}
 	}()
 
@@ -1433,13 +1433,13 @@ func (c *gnarkPlonkVerify) Run(input []byte) (b []byte, err error) {
 
 	witness, err := witness.New(id.ScalarField())
 	if nil != err {
-		return EncodeBool(false), nil
+		return EncodeBool(false), ErrCodeErr(GPVWitnessErr)
 	}
 	witness.ReadFrom(bytes.NewReader(gi.Witness))
 
 	err = plonk.Verify(proof, vk, witness)
 	if nil != err {
-		return EncodeBool(false), nil
+		return EncodeBool(false), ErrCodeErr(GPVVerifyErr)
 	}
 
 	return EncodeBool(true), nil

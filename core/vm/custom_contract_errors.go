@@ -8,8 +8,14 @@ import (
 
 var (
 	GG16VInputUnpackErr = 1000001
+	GG16VVerifyErr      = 1000002
+	GG16WitnessErr      = 1000003
+	GG16OtherErr        = 1000004
 
 	GPVInputUnpackErr = 1000011
+	GPVVerifyErr      = 1000012
+	GPVWitnessErr     = 1000013
+	GPVOther          = 1000014
 
 	EVReadIndexErr                   = 1000022
 	EVParseIndexErr                  = 1000023
