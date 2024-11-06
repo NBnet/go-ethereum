@@ -1581,10 +1581,15 @@ func (b *expanderVerify) RequiredGas(input []byte) uint64 {
 	return 7500
 }
 
-func (b *expanderVerify) Run(input []byte) ([]byte, error) {
+func (b *expanderVerify) Run(input []byte) (d []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			d = EncodeBool(false)
+			err = ErrCodeErr(EVOtherErr)
+		}
+	}()
 
 	var success bool
-	var err error
 
 	switch input[0] {
 	case 0:
