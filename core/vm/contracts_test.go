@@ -19,6 +19,7 @@ package vm
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -860,6 +861,7 @@ func TestRemotePlonk(t *testing.T) {
 	}
 
 }
+
 var (
 	Input string
 )
