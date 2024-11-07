@@ -18,13 +18,21 @@ package vm
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"io"
 	"maps"
 	"math/big"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
@@ -65,6 +73,7 @@ var PrecompiledContractsHomestead = PrecompiledContracts{
 
 	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
 	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
+	common.BytesToAddress([]byte{0xff, 0x02}): &expanderVerify{},
 }
 
 // PrecompiledContractsByzantium contains the default set of pre-compiled Ethereum
@@ -81,6 +90,7 @@ var PrecompiledContractsByzantium = PrecompiledContracts{
 
 	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
 	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
+	common.BytesToAddress([]byte{0xff, 0x02}): &expanderVerify{},
 }
 
 // PrecompiledContractsIstanbul contains the default set of pre-compiled Ethereum
@@ -98,6 +108,7 @@ var PrecompiledContractsIstanbul = PrecompiledContracts{
 
 	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
 	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
+	common.BytesToAddress([]byte{0xff, 0x02}): &expanderVerify{},
 }
 
 // PrecompiledContractsBerlin contains the default set of pre-compiled Ethereum
@@ -115,6 +126,7 @@ var PrecompiledContractsBerlin = PrecompiledContracts{
 
 	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
 	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
+	common.BytesToAddress([]byte{0xff, 0x02}): &expanderVerify{},
 }
 
 // PrecompiledContractsCancun contains the default set of pre-compiled Ethereum
@@ -133,6 +145,7 @@ var PrecompiledContractsCancun = PrecompiledContracts{
 
 	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
 	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
+	common.BytesToAddress([]byte{0xff, 0x02}): &expanderVerify{},
 }
 
 // PrecompiledContractsPrague contains the set of pre-compiled Ethereum
@@ -160,6 +173,7 @@ var PrecompiledContractsPrague = PrecompiledContracts{
 
 	common.BytesToAddress([]byte{0xff, 0x00}): &gnarkGroth16Verify{},
 	common.BytesToAddress([]byte{0xff, 0x01}): &gnarkPlonkVerify{},
+	common.BytesToAddress([]byte{0xff, 0x02}): &expanderVerify{},
 }
 
 var PrecompiledContractsBLS = PrecompiledContractsPrague
@@ -173,6 +187,14 @@ var (
 	PrecompiledAddressesIstanbul  []common.Address
 	PrecompiledAddressesByzantium []common.Address
 	PrecompiledAddressesHomestead []common.Address
+)
+
+var (
+	expanderSideChainDataPath string
+	expanderIndexFile         = "index"
+	expanderInputArgs         abi.Arguments
+	expanderInternalArgs      abi.Arguments
+	expanderInternalTmpPath   string
 )
 
 func init() {
@@ -193,6 +215,36 @@ func init() {
 	}
 	for k := range PrecompiledContractsPrague {
 		PrecompiledAddressesPrague = append(PrecompiledAddressesPrague, k)
+	}
+
+	expanderSideChainDataPath = os.Getenv("SIDE_CHAIN_DATA_PATH")
+	if len(expanderSideChainDataPath) == 0 {
+		expanderSideChainDataPath = "/tmp/side_chain_data"
+		fmt.Printf("`$SIDE_CHAIN_DATA_PATH` not set, use the default path: %s\n", expanderSideChainDataPath)
+	}
+
+	expanderInternalTmpPath = filepath.Join(expanderSideChainDataPath, "tmp")
+	err := os.MkdirAll(expanderInternalTmpPath, 0700)
+	if err != nil {
+		fmt.Println(err)
+		panic("cannot create expander tmp folder")
+	}
+
+	uint256Type, _ := abi.NewType("uint256", "", nil)
+	bytes32, _ := abi.NewType("bytes32", "", nil)
+	tuple, _ := abi.NewType("tuple", "", []abi.ArgumentMarshaling{
+		{Type: "bytes", Name: "circuit"},
+		{Type: "bytes", Name: "witness"},
+		{Type: "bytes", Name: "proof"},
+	})
+
+	expanderInputArgs = abi.Arguments{
+		{Type: uint256Type},
+		{Type: bytes32},
+	}
+
+	expanderInternalArgs = abi.Arguments{
+		{Type: tuple},
 	}
 }
 
@@ -1304,10 +1356,17 @@ func (b *gnarkGroth16Verify) RequiredGas(input []byte) uint64 {
 	return 7500
 }
 
-func (c *gnarkGroth16Verify) Run(input []byte) ([]byte, error) {
+func (c *gnarkGroth16Verify) Run(input []byte) (b []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			b = EncodeBool(false)
+			err = ErrCodeErr(GG16OtherErr)
+		}
+	}()
+
 	unpack, err := GnarkInputs{}.ToAbi().Unpack(input)
 	if err != nil {
-		return nil, err
+		return nil, ErrCodeErr(GG16VInputUnpackErr)
 	}
 	gi := unpack[0].(struct {
 		CurveId   uint16 `json:"curve_id"`
@@ -1326,16 +1385,16 @@ func (c *gnarkGroth16Verify) Run(input []byte) ([]byte, error) {
 
 	witness, err := witness.New(id.ScalarField())
 	if nil != err {
-		return nil, err
+		return EncodeBool(false), ErrCodeErr(GG16WitnessErr)
 	}
 	witness.ReadFrom(bytes.NewReader(gi.Witness))
 
 	err = groth16.Verify(proof, vk, witness)
-	if nil == err {
-		return []byte("y"), nil
-	} else {
-		return []byte("n"), nil
+	if nil != err {
+		return EncodeBool(false), ErrCodeErr(GG16VVerifyErr)
 	}
+
+	return EncodeBool(true), nil
 }
 
 type gnarkPlonkVerify struct{}
@@ -1344,10 +1403,17 @@ func (b *gnarkPlonkVerify) RequiredGas(input []byte) uint64 {
 	return 7500
 }
 
-func (c *gnarkPlonkVerify) Run(input []byte) ([]byte, error) {
+func (c *gnarkPlonkVerify) Run(input []byte) (b []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			b = EncodeBool(false)
+			err = ErrCodeErr(GPVOther)
+		}
+	}()
+
 	unpack, err := GnarkInputs{}.ToAbi().Unpack(input)
 	if err != nil {
-		return nil, err
+		return nil, ErrCodeErr(GPVInputUnpackErr)
 	}
 
 	gi := unpack[0].(struct {
@@ -1367,14 +1433,193 @@ func (c *gnarkPlonkVerify) Run(input []byte) ([]byte, error) {
 
 	witness, err := witness.New(id.ScalarField())
 	if nil != err {
-		return nil, err
+		return EncodeBool(false), ErrCodeErr(GPVWitnessErr)
 	}
 	witness.ReadFrom(bytes.NewReader(gi.Witness))
 
 	err = plonk.Verify(proof, vk, witness)
-	if nil == err {
-		return []byte("y"), nil
+	if nil != err {
+		return EncodeBool(false), ErrCodeErr(GPVVerifyErr)
+	}
+
+	return EncodeBool(true), nil
+}
+
+type expanderVerify struct{}
+
+func (b *expanderVerify) parseInput(input []byte) (string, error) {
+	indexFile := filepath.Join(expanderSideChainDataPath, expanderIndexFile)
+
+	indexHeight := uint64(0)
+	indexFileExist := true
+	_, err := os.Stat(indexFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			indexFileExist = false
+		} else {
+			return "", ErrCodeErr(EVReadIndexErr)
+		}
+	}
+
+	if indexFileExist {
+		heightBinaryBytes, err := os.ReadFile(indexFile)
+		if err != nil {
+			return "", ErrCodeErr(EVReadIndexErr)
+		}
+
+		indexHeight, err = strconv.ParseUint(string(heightBinaryBytes), 10, 64)
+		if err != nil {
+			return "", ErrCodeErr(EVParseIndexErr)
+		}
 	} else {
-		return []byte("n"), nil
+		indexHeight = 0
+	}
+
+	decode, err := expanderInputArgs.Unpack(input[1:])
+	if err != nil {
+		return "", ErrCodeErr(EVUnpackInputErr)
+	}
+
+	inputHeight, ok := decode[0].(*big.Int)
+	if !ok {
+		return "", ErrCodeErr(EVParseInputHeightErr)
+	}
+
+	if inputHeight.Uint64() > indexHeight {
+		return "", ErrCodeErr(EVInputGreaterThanIndexHeightErr)
+	}
+
+	inputHash, ok := decode[1].([32]uint8)
+	if !ok {
+		return "", ErrCodeErr(EVParseInputHashErr)
+	}
+
+	inputHashHex := hex.EncodeToString(inputHash[:])
+
+	dataFile := filepath.Join(expanderSideChainDataPath, inputHashHex[:4], inputHashHex)
+	_, err = os.Stat(dataFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrCodeErr(EVReadSideChainDataErr)
+		} else {
+			return "", ErrCodeErr(EVOtherErr)
+		}
+	}
+
+	return dataFile, nil
+}
+
+func (b *expanderVerify) execExpanderScd(txDataFilePath string) (bool, error) {
+
+	cmd := exec.Command("expander-exec", "verify-scd", txDataFilePath)
+
+	return b.execExpander(cmd)
+}
+
+func (b *expanderVerify) execExpanderBytes(input []byte) (bool, error) {
+
+	cmd := exec.Command("expander-exec", "verify-bytes", string(input))
+
+	return b.execExpander(cmd)
+}
+
+func (b *expanderVerify) execExpander(cmd *exec.Cmd) (bool, error) {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return false, ErrCodeErr(EVOtherErr)
+	}
+	defer stdout.Close()
+
+	if err = cmd.Start(); err != nil {
+		return false, ErrCodeErr(EVOtherErr)
+	}
+
+	var outputBuf bytes.Buffer
+	if _, err := io.Copy(&outputBuf, stdout); err != nil {
+		return false, ErrCodeErr(EVOtherErr)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return false, ErrCodeErr(EVOtherErr)
+	}
+
+	outputStr := outputBuf.String()
+
+	outputStr = strings.TrimSpace(outputStr)
+	if strings.ToLower(outputStr) == "success" {
+		return true, nil
+	} else {
+		return false, nil
+	}
+}
+
+func (b *expanderVerify) genExpanderInputFilePath(flag string) (string, string, string) {
+	circuitFilePath := filepath.Join(expanderInternalTmpPath, "circuit-"+flag)
+	witnessFilePath := filepath.Join(expanderInternalTmpPath, "witness-"+flag)
+	proofFilePath := filepath.Join(expanderInternalTmpPath, "proof-"+flag)
+
+	return circuitFilePath, witnessFilePath, proofFilePath
+}
+
+func (b *expanderVerify) decompressInput(input []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(input))
+	if err != nil {
+		return nil, ErrCodeErr(EVGzipDecompressErr)
+	}
+	defer reader.Close()
+
+	var deCompressData bytes.Buffer
+	_, err = io.Copy(&deCompressData, reader)
+	if err != nil {
+		return nil, ErrCodeErr(EVGzipDecompressErr)
+	}
+
+	return deCompressData.Bytes(), nil
+}
+
+func (b *expanderVerify) RequiredGas(input []byte) uint64 {
+	return 7500
+}
+
+func (b *expanderVerify) Run(input []byte) (d []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			d = EncodeBool(false)
+			err = ErrCodeErr(EVOtherErr)
+		}
+	}()
+
+	var success bool
+
+	switch input[0] {
+	case 0:
+		// direct
+		success, err = b.execExpanderBytes(input[1:])
+	case 1:
+		// decompress
+		data, err := b.decompressInput(input[1:])
+		if err != nil {
+			return nil, err
+		}
+		success, err = b.execExpanderBytes(data)
+	case 2:
+		// parse scd data file path
+		dataFilePath, err := b.parseInput(input)
+		if err != nil {
+			return nil, err
+		}
+		success, err = b.execExpanderScd(dataFilePath)
+	default:
+		return nil, ErrCodeErr(EVInvalidInput)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if success {
+		return EncodeBool(true), nil
+	} else {
+		return EncodeBool(false), nil
 	}
 }
